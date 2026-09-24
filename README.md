@@ -54,6 +54,18 @@ powershell -ExecutionPolicy Bypass -File .\run.ps1
 python3 -m checks.render_check
 ```
 
+### 渲染路径探针（可选）
+
+怀疑"Rendering 报 PASS 但实际是 CPU 软件渲染"时（WSL2 上常见，证据行会写 `llvmpipe`），
+用辅助脚本做分辨率标尺对照：
+
+```bash
+python3 tools/probe_gl.py                # 64 / 512 / 2048 三档渲染，打印 ms/frame 和 GL renderer
+python3 tools/probe_gl.py --frames 500   # 长跑一阵，方便同时盯 Task Manager / nvidia-smi
+```
+
+软件光栅化的帧耗时大致随像素数增长，真 GPU 增长慢得多；脚本不参与主报告判定、不修改任何环境。
+
 ## Verification philosophy
 
 **为什么 `import mujoco` 成功 ≠ 环境完整。**
@@ -251,7 +263,7 @@ if __name__ == "__main__":
 - 先看报告里的 `Context:` 行：SSH 会话 / 无 DISPLAY / 无 WSLg 的 WSL2 上渲染不可用通常是预期行为。
 - Linux headless：`MUJOCO_GL=egl`（需要 libegl1 和可用驱动）或 `MUJOCO_GL=osmesa`（`apt install libosmesa6`）。
   注意 Linux 上 `MUJOCO_GL=osmesa` 缺库时 MuJoCo 会静默吞掉错误、`mujoco.Renderer` 直接消失——报告会明确提示这种情形。
-- 看渲染器：`GL renderer:` 证据行写明实际光栅化器——`llvmpipe` / `softpipe` 是 CPU 软件渲染（GPU 没被用上），`NVIDIA` / `D3D12` / `Apple` 等是硬件路径。
+- 看渲染器：`GL renderer:` 证据行写明实际光栅化器——`llvmpipe` / `softpipe` 是 CPU 软件渲染（GPU 没被用上），`NVIDIA` / `D3D12` / `Apple` 等是硬件路径。想进一步坐实，用 `python3 tools/probe_gl.py` 做分辨率标尺对照（见 Usage）。
 - 驱动异常时可用 `LIBGL_ALWAYS_SOFTWARE=1` 强制软件渲染。
 - macOS：保持 `MUJOCO_GL` 不设置（默认 `cgl`，离屏可用）；`glfw` 需要桌面会话。
 
