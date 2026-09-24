@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import os
+
 from utils import platform_info, report
 
 CHECK_ID = "render"
@@ -58,8 +60,12 @@ def _troubleshooting(facts: dict, gl_raw, backend_failed: bool = False) -> list:
             tips.append("SSH session detected: 'glfw' needs a logged-in GUI session; CGL usually still works offscreen")
     elif os_name == "linux":
         if facts["wsl"].get("is_wsl"):
-            tips.append("WSL2: GLFW works through WSLg; for headless use MUJOCO_GL=egl (libraries live in "
-                        "/usr/lib/wsl/lib) or MUJOCO_GL=osmesa after 'apt install libosmesa6'")
+            tips.append("WSL2: GPU rendering goes through Mesa's d3d12 driver (NVIDIA passes through CUDA only); "
+                        "on machines with more than one GPU set MESA_D3D12_DEFAULT_ADAPTER_NAME to match the "
+                        "discrete GPU, e.g. 'NVIDIA'")
+            tips.append("WSL2: if rendering fails, produces blank frames, or silently lands on the software "
+                        "rasterizer (llvmpipe in the 'GL renderer' evidence), MUJOCO_GL=osmesa (after "
+                        "'apt install libosmesa6') is the reliable software fallback")
             if not facts["wsl"].get("wslg"):
                 tips.append("no WSLg detected: expect rendering to be unavailable over plain SSH into WSL")
         else:
@@ -91,6 +97,27 @@ def _image_stats(np, image) -> dict:
         "unique_colors": int(colors.shape[0]),
         "non_background_fraction": 1.0 - modal_fraction,
     }
+
+
+def _gl_info(gl_raw) -> dict:
+    """读取当前 GL 上下文实际使用的渲染器/版本；失败时静默返回空 dict。
+
+    某些平台上（如 WSL2 的 EGL）GL 后端会静默回退到软件光栅化器 llvmpipe，
+    "渲染成功"并不代表在用 GPU，因此把渲染器字符串写进报告。
+    """
+    try:
+        backend = (gl_raw or "").strip().lower()
+        if backend in ("egl", "osmesa"):
+            os.environ.setdefault("PYOPENGL_PLATFORM", backend)
+        from OpenGL import GL
+
+        def _string(name):
+            value = GL.glGetString(name)
+            return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+
+        return {"renderer": _string(GL.GL_RENDERER), "version": _string(GL.GL_VERSION)}
+    except Exception:
+        return {}
 
 
 def run() -> report.CheckResult:
@@ -128,6 +155,7 @@ def run() -> report.CheckResult:
                              suggestions=_troubleshooting(facts, gl_raw, backend_failed=True))
 
     renderer = None
+    gl_info = {}
     try:
         model = mujoco.MjModel.from_xml_string(DEMO_XML)
         data = mujoco.MjData(model)
@@ -136,6 +164,7 @@ def run() -> report.CheckResult:
         renderer = mujoco.Renderer(model, height=HEIGHT, width=WIDTH)
         renderer.update_scene(data, camera=camera_id if camera_id >= 0 else -1)
         image = renderer.render()
+        gl_info = _gl_info(gl_raw)
     except Exception as exc:
         evidence = [f"{type(exc).__name__}: {exc}", gl_msg]
         note = _headless_note(facts)
@@ -160,6 +189,10 @@ def run() -> report.CheckResult:
          f"{stats['non_background_fraction'] * 100:.1f}%, distinct colors: {stats['unique_colors']}"),
     ]
     details["image"] = stats
+    if gl_info.get("renderer"):
+        evidence.append(f"GL renderer: {gl_info['renderer']} (version {gl_info.get('version') or 'unknown'})")
+        details["gl_renderer"] = gl_info["renderer"]
+        details["gl_version"] = gl_info.get("version")
 
     if stats["std"] < MIN_STD or stats["non_background_fraction"] < MIN_NON_BG_FRACTION:
         return report.result(CHECK_ID, TITLE, LEVEL, report.WARNING,

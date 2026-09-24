@@ -92,7 +92,7 @@ GPU 检查用于发现"Blackwell 显卡 + 老驱动"这类隐性不匹配，但�
 | Linux 桌面 | `glfw` / `glx`, `egl`, `osmesa` | nvidia-smi + 驱动/算力匹配 | 无 `DISPLAY` 时 `glfw` 会快速失败，属预期 |
 | Linux headless / 容器 | `egl` 或 `osmesa` | 同上 | 渲染失败记 WARNING，不影响核心结论 |
 | Windows | `glfw` / `wgl` | nvidia-smi | 建议在正常桌面会话中运行；终端输出为纯 ASCII，避免 GBK 控制台乱码 |
-| WSL2（有 WSLg） | `glfw`（经 WSLg）/ `egl`, `osmesa` | nvidia-smi（CUDA 来自 Windows 宿主驱动） | **不要在 WSL 内安装 Linux NVIDIA 驱动**，会破坏驱动透传 |
+| WSL2（有 WSLg） | `glfw`（经 WSLg）/ `egl`, `osmesa` | nvidia-smi（CUDA 来自 Windows 宿主驱动） | GPU 渲染走 Mesa d3d12（NVIDIA 只透传 CUDA）；多 GPU 机器用 `MESA_D3D12_DEFAULT_ADAPTER_NAME` 选中独显；**不要在 WSL 内安装 Linux NVIDIA 驱动** |
 | WSL2（无 WSLg，纯 SSH） | `egl` 或 `osmesa` | 同上 | 渲染不可用属预期 |
 
 `MUJOCO_GL` 的合法取值按平台区分（非法值会让 `import mujoco` 直接失败）：
@@ -251,11 +251,15 @@ if __name__ == "__main__":
 - 先看报告里的 `Context:` 行：SSH 会话 / 无 DISPLAY / 无 WSLg 的 WSL2 上渲染不可用通常是预期行为。
 - Linux headless：`MUJOCO_GL=egl`（需要 libegl1 和可用驱动）或 `MUJOCO_GL=osmesa`（`apt install libosmesa6`）。
   注意 Linux 上 `MUJOCO_GL=osmesa` 缺库时 MuJoCo 会静默吞掉错误、`mujoco.Renderer` 直接消失——报告会明确提示这种情形。
+- 看渲染器：`GL renderer:` 证据行写明实际光栅化器——`llvmpipe` / `softpipe` 是 CPU 软件渲染（GPU 没被用上），`NVIDIA` / `D3D12` / `Apple` 等是硬件路径。
 - 驱动异常时可用 `LIBGL_ALWAYS_SOFTWARE=1` 强制软件渲染。
 - macOS：保持 `MUJOCO_GL` 不设置（默认 `cgl`，离屏可用）；`glfw` 需要桌面会话。
 
 **WSL2 相关**
-- 有 WSLg：渲染可走 `glfw`（经 WSLg 的 X/Wayland），或 `egl`。
+- GPU 渲染在 WSL 里的唯一路径是 Mesa 的 d3d12 驱动（NVIDIA 在 WSL 只透传 CUDA，不透传 GL/EGL）：GL → D3D12 → Windows 宿主驱动 → GPU。
+- 多 GPU 机器（核显 + 独显）Mesa 可能选错适配器，设置 `MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`（对显卡名做子串匹配）。
+- 看 `Rendering` 一节的 `GL renderer:` 证据行：出现 `llvmpipe` / `softpipe` 说明实际是 CPU 软件渲染——"PASS" 并不代表在用 GPU。
+- 有 WSLg 但 d3d12 起不来 / 出空白帧时，`MUJOCO_GL=osmesa`（`apt install libosmesa6`）是可靠的软件回退。
 - 无 WSLg（纯 SSH）：用 `osmesa` / `egl`，渲染不可用属预期。
 - CUDA 来自 Windows 宿主驱动透传（`/usr/lib/wsl/lib/libcuda.so.1`），**不要在 WSL 里安装 Linux NVIDIA 驱动**；报告会在检测到冲突时提示。
 
