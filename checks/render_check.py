@@ -2,6 +2,10 @@
 
 渲染是"平台差异最大"的一层：headless 服务器、SSH 会话、容器、WSL 里不可用属于常态，
 因此任何失败都记为 WARNING，并且只给出"该平台下最可能的原因"。
+
+另有一个专门的交叉检查："机器上有 NVIDIA GPU，但 GL_RENDERER 显示实际跑在 CPU 软件
+光栅化器（llvmpipe 等）或其他适配器上"不算渲染成功——出图只是表象，GPU 根本没被用上，
+这种情况记为 WARNING（而不是 PASS），并给出"把 GPU 用起来"的最小步骤。
 """
 
 from __future__ import annotations
@@ -60,9 +64,10 @@ def _troubleshooting(facts: dict, gl_raw, backend_failed: bool = False) -> list:
             tips.append("SSH session detected: 'glfw' needs a logged-in GUI session; CGL usually still works offscreen")
     elif os_name == "linux":
         if facts["wsl"].get("is_wsl"):
-            tips.append("WSL2: GPU rendering goes through Mesa's d3d12 driver (NVIDIA passes through CUDA only); "
-                        "on machines with more than one GPU set MESA_D3D12_DEFAULT_ADAPTER_NAME to match the "
-                        "discrete GPU, e.g. 'NVIDIA'")
+            tips.append("WSL2: GPU rendering goes through Mesa's d3d12 driver (NVIDIA passes through CUDA only). "
+                        "The verified recipe is GALLIUM_DRIVER=d3d12 (the variable the software/drisw GL path "
+                        "actually reads) + MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA (pick the discrete GPU on "
+                        "multi-GPU machines) + MUJOCO_GL=egl")
             tips.append("WSL2: if rendering fails, produces blank frames, or silently lands on the software "
                         "rasterizer (llvmpipe in the 'GL renderer' evidence), MUJOCO_GL=osmesa (after "
                         "'apt install libosmesa6') is the reliable software fallback")
@@ -82,6 +87,43 @@ def _troubleshooting(facts: dict, gl_raw, backend_failed: bool = False) -> list:
     valid = ", ".join(platform_info.VALID_MUJOCO_GL.get(os_name, []))
     tips.append(f"MUJOCO_GL is currently {'unset' if not gl_raw else gl_raw}; valid values on {os_name}: {valid}")
     return tips
+
+
+def _software_renderer_suggestions(facts: dict, gl_raw) -> list:
+    """帧渲染在 CPU 软件光栅化器上、但机器有 NVIDIA GPU 时，"把 GPU 用起来"的最小步骤。"""
+    os_name = facts["os"]
+    if facts["wsl"].get("is_wsl"):
+        tips = ["WSL2: the GL stack fell back to the CPU software rasterizer; the verified fix is "
+                "GALLIUM_DRIVER=d3d12 + MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA + MUJOCO_GL=egl "
+                "(Ubuntu 24.04 + WSLg, Mesa >= 24.1)"]
+    elif os_name == "linux":
+        tips = ["Linux: the GL stack fell back to software rasterization even though an NVIDIA GPU is present; "
+                "check the driver with 'nvidia-smi', use MUJOCO_GL=egl, and remove any forced-software overrides"]
+    elif os_name == "windows":
+        tips = ["Windows: assign python.exe to the NVIDIA GPU in Windows graphics settings / NVIDIA Control "
+                "Panel, then re-run from a normal desktop session"]
+    else:
+        tips = []
+    if os.environ.get("LIBGL_ALWAYS_SOFTWARE"):
+        tips.append("LIBGL_ALWAYS_SOFTWARE is set in this environment and forces software rendering; unset it "
+                    "to allow the GPU to be used")
+    if (gl_raw or "").strip().lower() == "osmesa":
+        tips.append("MUJOCO_GL=osmesa requests pure software rendering by design; "
+                    "unset it (or use egl) if the GPU is supposed to be used")
+    return tips
+
+
+def _other_adapter_suggestions(facts: dict) -> list:
+    """硬件渲染，但用的不是机器上那块 NVIDIA（混合显卡机器上常见的"选错适配器"）。"""
+    if facts["wsl"].get("is_wsl"):
+        return ["WSL2: Mesa's d3d12 driver defaults to the first adapter (often the Intel iGPU); set "
+                "MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA (with GALLIUM_DRIVER=d3d12 and MUJOCO_GL=egl) "
+                "to render on the NVIDIA GPU"]
+    if facts["os"] == "windows":
+        return ["Windows: let python.exe use the NVIDIA GPU via Windows graphics settings / NVIDIA Control "
+                "Panel, then re-run from a normal desktop session"]
+    return ["on hybrid-graphics Linux machines the GL stack may have picked the integrated GPU; "
+            "select the NVIDIA GPU explicitly (e.g. __NV_PRIME_RENDER_OFFLOAD=1 or DRI_PRIME=1)"]
 
 
 def _image_stats(np, image) -> dict:
@@ -199,6 +241,26 @@ def run() -> report.CheckResult:
                              "the renderer produced an image, but it looks blank",
                              details=details, evidence=evidence,
                              suggestions=_troubleshooting(facts, gl_raw))
+
+    # "出图了"不等于"在用 GPU"：机器上有 NVIDIA 显卡，却渲染在软件光栅化器或其他适配器上时不给 PASS
+    renderer_name = gl_info.get("renderer") or ""
+    if renderer_name and "nvidia" not in renderer_name.lower():
+        gpu_names = platform_info.query_nvidia_gpu_names()
+        if gpu_names:
+            gpu_text = ", ".join(gpu_names)
+            details["nvidia_gpus"] = gpu_names
+            if platform_info.is_software_renderer(renderer_name):
+                details["software_renderer"] = True
+                return report.result(CHECK_ID, TITLE, LEVEL, report.WARNING,
+                                     f"the frame rendered on the CPU software rasterizer ({renderer_name}) even "
+                                     f"though an NVIDIA GPU is present ({gpu_text}); the GPU is not being used",
+                                     details=details, evidence=evidence,
+                                     suggestions=_software_renderer_suggestions(facts, gl_raw))
+            return report.result(CHECK_ID, TITLE, LEVEL, report.WARNING,
+                                 f"the frame rendered on '{renderer_name}' rather than the NVIDIA GPU present "
+                                 f"({gpu_text}); the NVIDIA GPU is not being used",
+                                 details=details, evidence=evidence,
+                                 suggestions=_other_adapter_suggestions(facts))
 
     return report.result(CHECK_ID, TITLE, LEVEL, report.PASS,
                          f"rendered a {WIDTH}x{HEIGHT} frame from an offscreen camera",

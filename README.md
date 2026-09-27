@@ -56,7 +56,8 @@ python3 -m checks.render_check
 
 ### 渲染路径探针（可选）
 
-怀疑"Rendering 报 PASS 但实际是 CPU 软件渲染"时（WSL2 上常见，证据行会写 `llvmpipe`），
+渲染检查会在"机器上有 NVIDIA 显卡、帧却渲染在软件光栅化器或其他适配器上"时直接给 WARNING
+（证据行 `GL renderer:` 写明实际光栅化器）。想进一步坐实帧耗时是否随像素数线性增长，
 用辅助脚本做分辨率标尺对照：
 
 ```bash
@@ -82,6 +83,12 @@ import 只证明 wheel 能被加载，连 mj_step 能不能推进、Renderer 能
 核心 `mujoco` 包永远不需要 CUDA（CUDA 只与 MJX / `mujoco-mjx` 相关）。
 GPU 检查用于发现"Blackwell 显卡 + 老驱动"这类隐性不匹配，但任何结果都不影响核心结论。
 
+**为什么"有 NVIDIA 显卡却没用上"不算渲染 PASS。**
+"渲染出图"只证明 GL 栈能工作，不证明在用 GPU：WSL2 上 GL 会静默回退到软件光栅化器（llvmpipe），
+出图完全正常。因此渲染检查把 `GL renderer` 与机器上的 NVIDIA GPU 交叉核对——回退到软件光栅化器、
+或被其它适配器（如核显）接管时记 WARNING，并给出"把 GPU 用起来"的最小步骤；
+WARNING 依然不影响 exit code。
+
 **为什么有"依赖短路"。**
 `import mujoco` 失败时，simulation / rendering 会被标记为 `SKIPPED`（而不是再报一堆错），
 让报告的第一屏就指向唯一的根因。
@@ -93,7 +100,7 @@ GPU 检查用于发现"Blackwell 显卡 + 老驱动"这类隐性不匹配，但�
 | 0 | System：OS / 架构 / Python 版本门禁 / venv·conda / Rosetta / WSL / wheel 覆盖 / `MUJOCO_GL` 合法性 | FAIL（核心） |
 | 1 | MuJoCo import：`import mujoco`、包版本 vs 运行时版本、numpy | FAIL（核心） |
 | 2 | Simulation：内置最小模型跑 `mj_step`，小球落地并产生接触 | FAIL（核心） |
-| 3 | Rendering：`mujoco.Renderer` 出图并检查非空白 | WARNING（永不影响 exit code） |
+| 3 | Rendering：`mujoco.Renderer` 出图并检查非空白；有 NVIDIA 显卡却渲染在软件光栅化器/其它适配器上时记 WARNING | WARNING（永不影响 exit code） |
 | 4 | GPU：nvidia-smi / 驱动与算力匹配 / WSL 驱动透传 / MJX 包探测 | 信息项 |
 
 ## Supported platforms
@@ -104,7 +111,7 @@ GPU 检查用于发现"Blackwell 显卡 + 老驱动"这类隐性不匹配，但�
 | Linux 桌面 | `glfw` / `glx`, `egl`, `osmesa` | nvidia-smi + 驱动/算力匹配 | 无 `DISPLAY` 时 `glfw` 会快速失败，属预期 |
 | Linux headless / 容器 | `egl` 或 `osmesa` | 同上 | 渲染失败记 WARNING，不影响核心结论 |
 | Windows | `glfw` / `wgl` | nvidia-smi | 建议在正常桌面会话中运行；终端输出为纯 ASCII，避免 GBK 控制台乱码 |
-| WSL2（有 WSLg） | `glfw`（经 WSLg）/ `egl`, `osmesa` | nvidia-smi（CUDA 来自 Windows 宿主驱动） | GPU 渲染走 Mesa d3d12（NVIDIA 只透传 CUDA）；多 GPU 机器用 `MESA_D3D12_DEFAULT_ADAPTER_NAME` 选中独显；**不要在 WSL 内安装 Linux NVIDIA 驱动** |
+| WSL2（有 WSLg） | `glfw`（经 WSLg）/ `egl`, `osmesa` | nvidia-smi（CUDA 来自 Windows 宿主驱动） | GPU 渲染走 Mesa d3d12（NVIDIA 只透传 CUDA）：已验证组合 `GALLIUM_DRIVER=d3d12` + `MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA` + `MUJOCO_GL=egl`；**不要在 WSL 内安装 Linux NVIDIA 驱动** |
 | WSL2（无 WSLg，纯 SSH） | `egl` 或 `osmesa` | 同上 | 渲染不可用属预期 |
 
 `MUJOCO_GL` 的合法取值按平台区分（非法值会让 `import mujoco` 直接失败）：
@@ -263,14 +270,14 @@ if __name__ == "__main__":
 - 先看报告里的 `Context:` 行：SSH 会话 / 无 DISPLAY / 无 WSLg 的 WSL2 上渲染不可用通常是预期行为。
 - Linux headless：`MUJOCO_GL=egl`（需要 libegl1 和可用驱动）或 `MUJOCO_GL=osmesa`（`apt install libosmesa6`）。
   注意 Linux 上 `MUJOCO_GL=osmesa` 缺库时 MuJoCo 会静默吞掉错误、`mujoco.Renderer` 直接消失——报告会明确提示这种情形。
-- 看渲染器：`GL renderer:` 证据行写明实际光栅化器——`llvmpipe` / `softpipe` 是 CPU 软件渲染（GPU 没被用上），`NVIDIA` / `D3D12` / `Apple` 等是硬件路径。想进一步坐实，用 `python3 tools/probe_gl.py` 做分辨率标尺对照（见 Usage）。
+- 看渲染器：`GL renderer:` 证据行写明实际光栅化器——`llvmpipe` / `softpipe` 是 CPU 软件渲染（GPU 没被用上），`NVIDIA` / `D3D12` / `Apple` 等是硬件路径。机器上有 NVIDIA 显卡时，落在这类软件路径上不会给 PASS，而是 WARNING + 修复建议。想进一步坐实，用 `python3 tools/probe_gl.py` 做分辨率标尺对照（见 Usage）。
 - 驱动异常时可用 `LIBGL_ALWAYS_SOFTWARE=1` 强制软件渲染。
 - macOS：保持 `MUJOCO_GL` 不设置（默认 `cgl`，离屏可用）；`glfw` 需要桌面会话。
 
 **WSL2 相关**
 - GPU 渲染在 WSL 里的唯一路径是 Mesa 的 d3d12 驱动（NVIDIA 在 WSL 只透传 CUDA，不透传 GL/EGL）：GL → D3D12 → Windows 宿主驱动 → GPU。
-- 多 GPU 机器（核显 + 独显）Mesa 可能选错适配器，设置 `MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`（对显卡名做子串匹配）。
-- 看 `Rendering` 一节的 `GL renderer:` 证据行：出现 `llvmpipe` / `softpipe` 说明实际是 CPU 软件渲染——"PASS" 并不代表在用 GPU。
+- 已验证的组合（Ubuntu 24.04 + WSLg，Mesa >= 24.1）：`GALLIUM_DRIVER=d3d12`（WSLg 下 GL 客户端走软件/drisw 路径，实际读的是这个变量）+ `MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA`（多 GPU 机器选中独显，对显卡名做子串匹配）+ `MUJOCO_GL=egl`。把它写进 `~/.bashrc`；注意 root / 非交互 shell 不会读到它。
+- 看 `Rendering` 一节的 `GL renderer:` 证据行：出现 `llvmpipe` / `softpipe` 说明实际是 CPU 软件渲染。机器上有 NVIDIA 显卡时这不会是 PASS——渲染检查会给 WARNING 并附上上面这组修复变量。
 - 有 WSLg 但 d3d12 起不来 / 出空白帧时，`MUJOCO_GL=osmesa`（`apt install libosmesa6`）是可靠的软件回退。
 - 无 WSLg（纯 SSH）：用 `osmesa` / `egl`，渲染不可用属预期。
 - CUDA 来自 Windows 宿主驱动透传（`/usr/lib/wsl/lib/libcuda.so.1`），**不要在 WSL 里安装 Linux NVIDIA 驱动**；报告会在检测到冲突时提示。

@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import platform
 import re
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -37,6 +38,17 @@ _MIN_CUDA_BY_COMPUTE_CAP = [
     (8.0, "11.0"),
     (7.5, "10.0"),
 ]
+
+# GL_RENDERER 字符串中出现这些标记 = CPU 软件光栅化（"渲染成功" ≠ 在用 GPU）
+SOFTWARE_RENDERER_MARKERS = (
+    "llvmpipe",              # Mesa 软件光栅化器，WSL2/Linux 上最常见的静默回退目标
+    "softpipe",              # Mesa 的另一个软件光栅化器
+    "swrast",                # Mesa 软件栅格化的经典名字
+    "software rasterizer",
+    "lavapipe",              # Vulkan 版软件光栅化器
+    "microsoft basic render",  # Windows 的 WARP 软件适配器（D3D12 下会这样显示）
+    "gdi generic",           # Windows 的老式软件 OpenGL
+)
 
 
 # ---------- 纯函数：平台判定 ----------
@@ -193,6 +205,12 @@ def evaluate_gpu_compat(gpus: list, driver_cuda) -> list:
     return items
 
 
+def is_software_renderer(renderer: str) -> bool:
+    """GL_RENDERER 字符串是否指向 CPU 软件光栅化器（llvmpipe 等）。"""
+    text = (renderer or "").lower()
+    return any(marker in text for marker in SOFTWARE_RENDERER_MARKERS)
+
+
 # ---------- 系统读取（薄封装，便于在其它平台复用纯函数） ----------
 
 def describe_python_runtime() -> str:
@@ -213,6 +231,24 @@ def gather_headless_hints() -> list:
     if os_key(platform.system()) == "linux" and not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
         hints.append("no-display")
     return hints
+
+
+def query_nvidia_gpu_names(timeout: int = 8) -> list:
+    """轻量探测：nvidia-smi 可用且能回答时返回 GPU 名称列表，否则返回空列表。
+
+    只回答"这台机器上有没有 NVIDIA GPU"，不做兼容性分析（那是 gpu_check 的职责）。
+    """
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return []
+    try:
+        proc = subprocess.run([smi, "--query-gpu=name", "--format=csv,noheader"],
+                              capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return []
+    if proc.returncode != 0:
+        return []
+    return [line.strip() for line in (proc.stdout or "").splitlines() if line.strip()]
 
 
 def gather_platform_facts() -> dict:
